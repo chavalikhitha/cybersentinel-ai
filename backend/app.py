@@ -158,6 +158,8 @@ async def predict_csv(file: UploadFile = File(...)):
     Response schema:
     {
         "total_records": int,
+        "returned_predictions": int,
+        "predictions_truncated": bool,
         "predictions": [
             {
                 "record_index": int,
@@ -228,10 +230,13 @@ async def predict_csv(file: UploadFile = File(...)):
 
     # --- Batch Prediction (5,000 rows per chunk) ---
     BATCH_SIZE = 5000
+    MAX_PER_RECORD_LIMIT = 1000
+    is_large_dataset = total_rows > 10000
+
     predictions = []
     summary: dict[str, int] = {}
 
-    logger.info(f"Processing {total_rows} records in batches of {BATCH_SIZE}...")
+    logger.info(f"Processing {total_rows} records in batches of {BATCH_SIZE} (truncated per-record list: {is_large_dataset})...")
 
     try:
         for start_idx in range(0, total_rows, BATCH_SIZE):
@@ -246,22 +251,30 @@ async def predict_csv(file: UploadFile = File(...)):
             for i_offset, (label, conf) in enumerate(zip(predicted_labels, confidences)):
                 global_index = start_idx + i_offset
                 risk = get_risk(label)
-                predictions.append({
-                    "record_index": global_index,
-                    "attack_type": label,
-                    "confidence": round(float(conf), 4),
-                    "risk": risk,
-                })
+
+                # For large datasets (>10,000), return only the first 1,000 per-record predictions
+                # to prevent multi-megabyte payloads that cause browser network timeouts.
+                if not is_large_dataset or len(predictions) < MAX_PER_RECORD_LIMIT:
+                    predictions.append({
+                        "record_index": global_index,
+                        "attack_type": label,
+                        "confidence": round(float(conf), 4),
+                        "risk": risk,
+                    })
+
+                # Summary is computed across ALL records in the dataset
                 summary[label] = summary.get(label, 0) + 1
 
     except Exception as e:
         logger.error(f"Prediction error during batch processing: {e}")
         raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
 
-    logger.info(f"Analysis complete for {total_rows} records. Summary: {summary}")
+    logger.info(f"Analysis complete for {total_rows} records. Summary: {summary} | Returned predictions: {len(predictions)}")
 
     return JSONResponse(content={
         "total_records": total_rows,
+        "returned_predictions": len(predictions),
+        "predictions_truncated": is_large_dataset,
         "predictions": predictions,
         "summary": summary,
     })
