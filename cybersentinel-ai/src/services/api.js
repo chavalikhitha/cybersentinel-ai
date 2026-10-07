@@ -84,3 +84,28 @@ export async function getRecentPredictions(limit = 50) {
     throw err;
   }
 }
+
+/**
+ * Fetch recent HTTP traffic events from the backend (forwarded from NovaTech test website).
+ * GET /api/traffic-events?limit=50
+ */
+export async function getTrafficEvents(limit = 50) {
+  try {
+    const response = await fetch(`${API_URL}/api/traffic-events?limit=${limit}`, {
+      method: 'GET',
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Server error: ${response.status} ${response.statusText}`);
+    }
+
+    return await response.json();
+  } catch (err) {
+    if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.message.includes('ERR_CONNECTION_REFUSED')) {
+      throw new Error(`Backend unavailable. Make sure the FastAPI server is running at ${API_URL}`);
+    }
+    throw err;
+  }
+}
+

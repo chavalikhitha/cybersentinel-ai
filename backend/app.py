@@ -21,8 +21,9 @@ import logging
 import httpx
 import numpy as np
 import pandas as pd
+import uuid
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,6 +44,10 @@ NOVATECH_URL = os.getenv("NOVATECH_URL", "http://127.0.0.1:8001")
 # In-memory history for live captured flow predictions
 MAX_HISTORY = 500
 PREDICTION_HISTORY: deque[dict[str, Any]] = deque(maxlen=MAX_HISTORY)
+
+# In-memory store for live HTTP traffic events from NovaTech test website
+MAX_TRAFFIC_EVENTS = 500
+TRAFFIC_EVENTS: deque[dict[str, Any]] = deque(maxlen=MAX_TRAFFIC_EVENTS)
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -397,3 +402,60 @@ async def recent_predictions(limit: int = 50):
         "predictions": [],
         "flows": [],
     })
+
+
+# ---------------------------------------------------------------------------
+# Live HTTP Traffic Events (NovaTech integration)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/traffic-events", tags=["Traffic Events"])
+async def ingest_traffic_event(request: Request):
+    """
+    Accepts genuine HTTP metadata events from the NovaTech test website:
+    id, timestamp, method, path, query, client_ip, user_agent, status_code, response_time_ms.
+    Stores the event in thread-safe in-memory deque (last 500 events).
+    """
+    try:
+        data = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+
+    event = {
+        "id": str(data.get("id") or uuid.uuid4()),
+        "timestamp": str(data.get("timestamp") or datetime.now(timezone.utc).isoformat()),
+        "method": str(data.get("method", "GET")),
+        "path": str(data.get("path", "/")),
+        "query": data.get("query"),
+        "client_ip": str(data.get("client_ip", "unknown")),
+        "user_agent": str(data.get("user_agent", "unknown")),
+        "status_code": int(data.get("status_code", 200)),
+        "response_time_ms": float(data.get("response_time_ms", 0.0)),
+    }
+
+    TRAFFIC_EVENTS.append(event)
+    logger.info(
+        f"HTTP Traffic Event: {event['method']} {event['path']} "
+        f"[{event['status_code']}] {event['response_time_ms']}ms ({event['client_ip']})"
+    )
+
+    return JSONResponse(content={"status": "ok", "message": "Event recorded", "id": event["id"]})
+
+
+@app.get("/api/traffic-events", tags=["Traffic Events"])
+async def get_traffic_events(limit: int = 50):
+    """
+    Returns the most recent HTTP traffic events stored in memory.
+    """
+    limit = max(1, min(limit, 500))
+    events = list(TRAFFIC_EVENTS)[-limit:]
+    # Return newest events first for clean display in the live table
+    events.reverse()
+    return JSONResponse(content={
+        "total_stored": len(TRAFFIC_EVENTS),
+        "returned": len(events),
+        "events": events,
+    })
+

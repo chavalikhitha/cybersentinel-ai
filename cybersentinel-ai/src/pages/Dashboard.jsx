@@ -4,7 +4,7 @@ import Header from '../components/Header';
 import StatCard from '../components/StatCard';
 import AttackTable from '../components/AttackTable';
 import { AttackDistributionPieChart } from '../components/Charts';
-import { getRecentPredictions } from '../services/api';
+import { getRecentPredictions, getTrafficEvents } from '../services/api';
 import './Page.css';
 
 const COLORS = [
@@ -62,19 +62,34 @@ function buildDashboardData(predictions) {
 }
 
 export default function Dashboard() {
-  const [predictions, setPredictions]   = useState([]);
-  const [hasData, setHasData]           = useState(false);
-  const [fetchError, setFetchError]     = useState(null);
-  const intervalRef                     = useRef(null);
+  const [predictions, setPredictions]     = useState([]);
+  const [trafficEvents, setTrafficEvents] = useState([]);
+  const [hasData, setHasData]             = useState(false);
+  const [fetchError, setFetchError]       = useState(null);
+  const intervalRef                       = useRef(null);
 
   const fetchData = async () => {
     try {
-      const data = await getRecentPredictions(50);
-      // Backend may return an array directly or { predictions: [...] }
-      const list = Array.isArray(data) ? data : (data.predictions ?? []);
-      setPredictions(list);
-      setHasData(list.length > 0);
-      setFetchError(null);
+      const [predRes, eventsRes] = await Promise.allSettled([
+        getRecentPredictions(50),
+        getTrafficEvents(50),
+      ]);
+
+      if (predRes.status === 'fulfilled') {
+        const data = predRes.value;
+        const list = Array.isArray(data) ? data : (data?.predictions ?? []);
+        setPredictions(list);
+        setHasData(list.length > 0);
+        setFetchError(null);
+      } else {
+        setFetchError(predRes.reason?.message || 'Failed to fetch predictions');
+      }
+
+      if (eventsRes.status === 'fulfilled') {
+        const evData = eventsRes.value;
+        const evList = Array.isArray(evData) ? evData : (evData?.events ?? []);
+        setTrafficEvents(evList);
+      }
     } catch (err) {
       setFetchError(err.message);
     }
@@ -202,6 +217,99 @@ export default function Dashboard() {
           ) : (
             <p style={{ padding: '24px 20px', color: '#9ca3af', fontSize: 13 }}>
               {fetchError ? 'Backend unavailable.' : waitingMsg}
+            </p>
+          )}
+        </div>
+
+        {/* Recent Live Traffic Table */}
+        <div className="card" style={{ marginTop: 24 }}>
+          <div className="card-header">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Activity size={18} style={{ color: '#1d4ed8' }} />
+              <h2 className="card-title">Recent Live Traffic</h2>
+            </div>
+            <span className="card-badge">
+              {trafficEvents.length > 0 ? `Last ${trafficEvents.length} events` : 'Live Telemetry'}
+            </span>
+          </div>
+          {trafficEvents.length > 0 ? (
+            <div className="table-scroll">
+              <table className="attack-table">
+                <thead>
+                  <tr>
+                    <th>Timestamp</th>
+                    <th>Method</th>
+                    <th>Path</th>
+                    <th>Status</th>
+                    <th>Response Time</th>
+                    <th>Client IP</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trafficEvents.map((evt, idx) => {
+                    const statusClass =
+                      evt.status_code >= 500
+                        ? 'badge--high'
+                        : evt.status_code >= 400
+                        ? 'badge--medium'
+                        : 'badge--clean';
+
+                    const methodStyle =
+                      evt.method === 'GET'
+                        ? { background: '#eff6ff', color: '#1d4ed8' }
+                        : evt.method === 'POST'
+                        ? { background: '#ecfdf5', color: '#047857' }
+                        : evt.method === 'DELETE'
+                        ? { background: '#fef2f2', color: '#dc2626' }
+                        : { background: '#fffbeb', color: '#b45309' };
+
+                    let timeStr = evt.timestamp || '—';
+                    if (evt.timestamp) {
+                      const d = new Date(evt.timestamp);
+                      if (!isNaN(d.getTime())) {
+                        timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                      }
+                    }
+
+                    return (
+                      <tr key={evt.id || idx}>
+                        <td className="td-mono">{timeStr}</td>
+                        <td>
+                          <span style={{
+                            display: 'inline-block',
+                            padding: '2px 8px',
+                            borderRadius: 4,
+                            fontSize: 11,
+                            fontWeight: 700,
+                            letterSpacing: '0.04em',
+                            ...methodStyle,
+                          }}>
+                            {evt.method}
+                          </span>
+                        </td>
+                        <td style={{ fontFamily: 'monospace', fontSize: 13, color: '#0f172a' }}>
+                          {evt.path}{evt.query ? `?${evt.query}` : ''}
+                        </td>
+                        <td>
+                          <span className={`badge ${statusClass}`}>
+                            {evt.status_code}
+                          </span>
+                        </td>
+                        <td className="td-mono">
+                          {typeof evt.response_time_ms === 'number'
+                            ? `${evt.response_time_ms.toFixed(1)} ms`
+                            : `${evt.response_time_ms || '0'} ms`}
+                        </td>
+                        <td className="td-mono">{evt.client_ip || '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p style={{ padding: '24px 20px', color: '#9ca3af', fontSize: 13 }}>
+              {waitingMsg}
             </p>
           )}
         </div>
