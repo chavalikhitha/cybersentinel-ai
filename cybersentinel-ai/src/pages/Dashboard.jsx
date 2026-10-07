@@ -1,87 +1,167 @@
-import React from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Shield, Activity, AlertTriangle, TrendingUp } from 'lucide-react';
 import Header from '../components/Header';
 import StatCard from '../components/StatCard';
 import AttackTable from '../components/AttackTable';
 import { AttackDistributionPieChart } from '../components/Charts';
+import { getRecentPredictions } from '../services/api';
 import './Page.css';
 
-// Demo data for the dashboard
-const DEMO_STATS = {
-  totalTraffic: '2,847,392',
-  attacksDetected: '14,821',
-  currentRisk: 'MEDIUM',
-  modelConfidence: '94.3%',
-};
-
-const DEMO_CHART_DATA = [
-  { name: 'BENIGN', value: 2400 },
-  { name: 'DoS Hulk', value: 580 },
-  { name: 'PortScan', value: 320 },
-  { name: 'DDoS', value: 210 },
-  { name: 'FTP-Patator', value: 160 },
-  { name: 'SSH-Patator', value: 120 },
-  { name: 'Web Attack', value: 90 },
-  { name: 'Infiltration', value: 45 },
+const COLORS = [
+  '#1d4ed8', '#06b6d4', '#8b5cf6', '#10b981',
+  '#f59e0b', '#ef4444', '#ec4899', '#6366f1',
 ];
 
-const DEMO_DETECTIONS = [
-  { timestamp: '2024-01-15 14:22:01', attackType: 'DoS Hulk', confidence: 0.97, risk: 'HIGH', status: 'BLOCKED' },
-  { timestamp: '2024-01-15 14:20:44', attackType: 'BENIGN', confidence: 0.99, risk: 'LOW', status: 'CLEAN' },
-  { timestamp: '2024-01-15 14:19:32', attackType: 'PortScan', confidence: 0.88, risk: 'MEDIUM', status: 'FLAGGED' },
-  { timestamp: '2024-01-15 14:17:10', attackType: 'DDoS', confidence: 0.95, risk: 'HIGH', status: 'BLOCKED' },
-  { timestamp: '2024-01-15 14:15:56', attackType: 'FTP-Patator', confidence: 0.82, risk: 'MEDIUM', status: 'FLAGGED' },
-  { timestamp: '2024-01-15 14:14:03', attackType: 'BENIGN', confidence: 0.98, risk: 'LOW', status: 'CLEAN' },
-  { timestamp: '2024-01-15 14:12:49', attackType: 'Web Attack XSS', confidence: 0.76, risk: 'MEDIUM', status: 'FLAGGED' },
-  { timestamp: '2024-01-15 14:11:22', attackType: 'SSH-Patator', confidence: 0.91, risk: 'HIGH', status: 'BLOCKED' },
-];
+const POLL_INTERVAL_MS = 3000;
+
+/* ── Derive dashboard stats from the predictions array ── */
+function buildDashboardData(predictions) {
+  const total = predictions.length;
+
+  const attacks = predictions.filter(
+    (p) => (p.attack_type || '').toUpperCase() !== 'BENIGN'
+  );
+
+  const hasHigh = predictions.some(
+    (p) => (p.risk || '').toUpperCase() === 'HIGH'
+  );
+  const currentRisk = hasHigh ? 'HIGH' : total === 0 ? '—' : 'LOW';
+
+  // Build attack distribution counts
+  const counts = {};
+  predictions.forEach((p) => {
+    const label = p.attack_type || 'UNKNOWN';
+    counts[label] = (counts[label] || 0) + 1;
+  });
+  const chartData = Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, value]) => ({ name, value }));
+
+  // Format records for AttackTable — map API fields → table fields
+  const tableData = predictions.map((p, idx) => ({
+    id: p.record_index ?? idx,
+    timestamp: p.timestamp || '—',
+    attackType: p.attack_type || '—',
+    confidence: p.confidence ?? null,
+    risk: p.risk || 'LOW',
+    status:
+      (p.risk || '').toUpperCase() === 'HIGH'
+        ? 'BLOCKED'
+        : (p.risk || '').toUpperCase() === 'MEDIUM'
+        ? 'FLAGGED'
+        : 'CLEAN',
+  }));
+
+  return {
+    totalTraffic: total.toLocaleString(),
+    attacksDetected: attacks.length.toLocaleString(),
+    currentRisk,
+    chartData,
+    tableData,
+  };
+}
 
 export default function Dashboard() {
+  const [predictions, setPredictions]   = useState([]);
+  const [hasData, setHasData]           = useState(false);
+  const [fetchError, setFetchError]     = useState(null);
+  const intervalRef                     = useRef(null);
+
+  const fetchData = async () => {
+    try {
+      const data = await getRecentPredictions(50);
+      // Backend may return an array directly or { predictions: [...] }
+      const list = Array.isArray(data) ? data : (data.predictions ?? []);
+      setPredictions(list);
+      setHasData(list.length > 0);
+      setFetchError(null);
+    } catch (err) {
+      setFetchError(err.message);
+    }
+  };
+
+  useEffect(() => {
+    // Fetch immediately on mount, then poll every 3 s
+    fetchData();
+    intervalRef.current = setInterval(fetchData, POLL_INTERVAL_MS);
+
+    return () => clearInterval(intervalRef.current);
+  }, []);
+
+  const {
+    totalTraffic,
+    attacksDetected,
+    currentRisk,
+    chartData,
+    tableData,
+  } = buildDashboardData(predictions);
+
+  const waitingMsg = 'Waiting for live traffic...';
+
   return (
     <div className="page">
       <Header title="Dashboard" />
       <div className="page-content">
+
+        {/* Backend error banner */}
+        {fetchError && (
+          <div className="alert-error" style={{ marginBottom: 16 }}>
+            <Shield size={15} />
+            <div>
+              <p className="alert-title">Backend Unavailable</p>
+              <p className="alert-msg">{fetchError}</p>
+            </div>
+          </div>
+        )}
 
         {/* Stats Grid */}
         <div className="stats-grid">
           <StatCard
             icon={<Activity size={20} />}
             label="Total Traffic Analyzed"
-            value={DEMO_STATS.totalTraffic}
-            sub="All-time records processed"
+            value={hasData ? totalTraffic : waitingMsg}
+            sub="Records from last 50 predictions"
             accent="blue"
           />
           <StatCard
             icon={<AlertTriangle size={20} />}
             label="Attacks Detected"
-            value={DEMO_STATS.attacksDetected}
-            sub="Across all categories"
+            value={hasData ? attacksDetected : waitingMsg}
+            sub="Non-BENIGN predictions"
             accent="red"
           />
           <StatCard
             icon={<Shield size={20} />}
             label="Current Risk"
-            value={DEMO_STATS.currentRisk}
-            sub="Based on recent traffic"
+            value={hasData ? currentRisk : waitingMsg}
+            sub="Based on recent predictions"
             accent="yellow"
           />
           <StatCard
             icon={<TrendingUp size={20} />}
             label="Model Confidence"
-            value={DEMO_STATS.modelConfidence}
-            sub="Random Forest accuracy"
+            value="N/A"
+            sub="Not provided by this endpoint"
             accent="green"
           />
         </div>
 
-        {/* Chart */}
+        {/* Chart + Summary */}
         <div className="section-row">
           <div className="card flex-1">
             <div className="card-header">
               <h2 className="card-title">Attack Distribution</h2>
-              <span className="card-badge">Live Overview</span>
+              <span className="card-badge">
+                {hasData ? `Live · polled every ${POLL_INTERVAL_MS / 1000}s` : 'Waiting for data'}
+              </span>
             </div>
-            <AttackDistributionPieChart data={DEMO_CHART_DATA} />
+            {hasData ? (
+              <AttackDistributionPieChart data={chartData} />
+            ) : (
+              <p style={{ padding: '24px 20px', color: '#9ca3af', fontSize: 13 }}>
+                {fetchError ? 'Backend unavailable.' : waitingMsg}
+              </p>
+            )}
           </div>
 
           <div className="card" style={{ width: 280 }}>
@@ -89,15 +169,22 @@ export default function Dashboard() {
               <h2 className="card-title">Attack Summary</h2>
             </div>
             <div className="summary-list">
-              {DEMO_CHART_DATA.map((item, idx) => (
-                <div key={item.name} className="summary-row">
-                  <div className="summary-dot" style={{ background: [
-                    '#1d4ed8','#06b6d4','#8b5cf6','#10b981','#f59e0b','#ef4444','#ec4899','#6366f1'
-                  ][idx % 8] }} />
-                  <span className="summary-name">{item.name}</span>
-                  <span className="summary-count">{item.value.toLocaleString()}</span>
-                </div>
-              ))}
+              {hasData ? (
+                chartData.map((item, idx) => (
+                  <div key={item.name} className="summary-row">
+                    <div
+                      className="summary-dot"
+                      style={{ background: COLORS[idx % COLORS.length] }}
+                    />
+                    <span className="summary-name">{item.name}</span>
+                    <span className="summary-count">{item.value.toLocaleString()}</span>
+                  </div>
+                ))
+              ) : (
+                <p style={{ padding: '12px 16px', color: '#9ca3af', fontSize: 13 }}>
+                  {fetchError ? 'Backend unavailable.' : waitingMsg}
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -106,9 +193,17 @@ export default function Dashboard() {
         <div className="card">
           <div className="card-header">
             <h2 className="card-title">Recent Detections</h2>
-            <span className="card-badge">Last 8 records</span>
+            <span className="card-badge">
+              {hasData ? `Last ${tableData.length} records` : 'Waiting for data'}
+            </span>
           </div>
-          <AttackTable data={DEMO_DETECTIONS} />
+          {hasData ? (
+            <AttackTable data={tableData} />
+          ) : (
+            <p style={{ padding: '24px 20px', color: '#9ca3af', fontSize: 13 }}>
+              {fetchError ? 'Backend unavailable.' : waitingMsg}
+            </p>
+          )}
         </div>
 
       </div>

@@ -1,5 +1,5 @@
 import React from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, Link } from 'react-router-dom';
 import {
   LayoutDashboard,
   Activity,
@@ -11,7 +11,7 @@ import {
 import './Sidebar.css';
 
 const navItems = [
-  { to: '/', icon: <LayoutDashboard size={18} />, label: 'Dashboard', end: true },
+  { to: '/dashboard', icon: <LayoutDashboard size={18} />, label: 'Dashboard' },
   { to: '/traffic', icon: <Activity size={18} />, label: 'Traffic Analysis' },
   { to: '/analytics', icon: <BarChart2 size={18} />, label: 'Analytics' },
   { to: '/detection', icon: <ShieldAlert size={18} />, label: 'Attack Detection' },
@@ -21,7 +21,7 @@ const navItems = [
 export default function Sidebar() {
   return (
     <aside className="sidebar">
-      <div className="sidebar-logo">
+      <Link to="/" className="sidebar-logo" title="Back to 3D Overview">
         <div className="logo-icon">
           <Shield size={22} strokeWidth={2.5} />
         </div>
@@ -29,7 +29,7 @@ export default function Sidebar() {
           <span className="logo-title">CyberSentinel</span>
           <span className="logo-ai">AI</span>
         </div>
-      </div>
+      </Link>
 
       <nav className="sidebar-nav">
         <p className="nav-section-label">NAVIGATION</p>
@@ -37,7 +37,6 @@ export default function Sidebar() {
           <NavLink
             key={item.to}
             to={item.to}
-            end={item.end}
             className={({ isActive }) =>
               `nav-item ${isActive ? 'nav-item--active' : ''}`
             }

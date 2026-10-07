@@ -1,9 +1,21 @@
+import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
+import path from 'path'
+import { fileURLToPath } from 'url'
 import { defineConfig } from 'vite'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
+
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, 'src'),
+    },
+  },
 
   // ── Development server ──────────────────────────────────────────
   server: {
@@ -15,14 +27,18 @@ export default defineConfig({
   // ── Production build ────────────────────────────────────────────
   build: {
     outDir: 'dist',
-    // Generate sourcemaps for debugging (remove in prod if you prefer)
     sourcemap: false,
     rollupOptions: {
       output: {
-        // Split vendor chunks to improve caching (function form required by Vite 8/rolldown)
         manualChunks(id) {
           if (id.includes('node_modules/recharts') || id.includes('node_modules/d3')) {
             return 'charts';
+          }
+          if (id.includes('node_modules/three')) {
+            return 'three';
+          }
+          if (id.includes('node_modules/gsap') || id.includes('node_modules/lenis')) {
+            return 'animation';
           }
           if (id.includes('node_modules/react') || id.includes('node_modules/react-dom') || id.includes('node_modules/react-router-dom')) {
             return 'vendor';

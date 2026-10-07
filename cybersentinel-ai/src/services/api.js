@@ -57,3 +57,30 @@ export async function checkHealth() {
     return false;
   }
 }
+
+/**
+ * Fetch recent predictions from the backend.
+ * GET /api/recent-predictions?limit=50
+ *
+ * Proxied through the CyberSentinel FastAPI backend, which forwards
+ * the request to the NovaTech live-capture backend.
+ */
+export async function getRecentPredictions(limit = 50) {
+  try {
+    const response = await fetch(`${API_URL}/api/recent-predictions?limit=${limit}`, {
+      method: 'GET',
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `Server error: ${response.status} ${response.statusText}`);
+    }
+
+    return await response.json();
+  } catch (err) {
+    if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.message.includes('ERR_CONNECTION_REFUSED')) {
+      throw new Error(`Backend unavailable. Make sure the FastAPI server is running at ${API_URL}`);
+    }
+    throw err;
+  }
+}

@@ -18,9 +18,13 @@ import io
 import joblib
 import logging
 
+import httpx
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from collections import deque
+from datetime import datetime
+from typing import Any
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -29,6 +33,16 @@ from fastapi.responses import JSONResponse
 # ---------------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# NovaTech backend URL — the source of live traffic predictions.
+# Override via env var when running on Render or changing the port.
+# ---------------------------------------------------------------------------
+NOVATECH_URL = os.getenv("NOVATECH_URL", "http://127.0.0.1:8001")
+
+# In-memory history for live captured flow predictions
+MAX_HISTORY = 500
+PREDICTION_HISTORY: deque[dict[str, Any]] = deque(maxlen=MAX_HISTORY)
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -54,6 +68,7 @@ logger.info(f"CORS allowed origins: {ALLOWED_ORIGINS}")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://.*\.onrender\.com",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -232,4 +247,123 @@ async def predict_csv(file: UploadFile = File(...)):
         "total_records": len(df),
         "predictions": predictions,
         "summary": summary,
+    })
+
+# ---------------------------------------------------------------------------
+# Live Traffic Ingestion & Recent Predictions
+# ---------------------------------------------------------------------------
+
+@app.post("/api/ingest-flow", tags=["Live Traffic"])
+async def ingest_flow(request: Request):
+    """
+    Receives a single network flow feature dictionary (78 CIC-IDS2017 features)
+    from the capture script, runs the Random Forest model prediction,
+    and stores the result for /api/recent-predictions.
+    """
+    if model is None or label_encoder is None or feature_cols is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Model files are not loaded. "
+                "Place cybersentinel_model.pkl, label_encoder.pkl, and "
+                "feature_columns.pkl in the backend directory."
+            ),
+        )
+
+    try:
+        body = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {e}")
+
+    if isinstance(body, list):
+        if not body:
+            raise HTTPException(status_code=400, detail="Empty list received")
+        feat_dict = body[0]
+    elif isinstance(body, dict):
+        feat_dict = body
+    else:
+        raise HTTPException(status_code=400, detail="Expected JSON dictionary of features")
+
+    # Align columns to training feature order
+    df = pd.DataFrame([feat_dict])
+    df.columns = df.columns.str.strip()
+
+    # Drop any label column if present
+    for col in ["Label", "label", " Label"]:
+        if col in df.columns:
+            df = df.drop(columns=[col])
+
+    X = df.reindex(columns=feature_cols, fill_value=0)
+    X = X.replace([np.inf, -np.inf], np.nan).fillna(0)
+
+    try:
+        probabilities = model.predict_proba(X)
+        pred_idx = int(np.argmax(probabilities, axis=1)[0])
+        label = str(label_encoder.inverse_transform([pred_idx])[0])
+        conf = float(probabilities[0, pred_idx])
+    except Exception as e:
+        logger.error(f"Prediction error during ingest-flow: {e}")
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
+
+    risk = get_risk(label)
+    timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    record = {
+        "record_index": len(PREDICTION_HISTORY),
+        "timestamp": timestamp_str,
+        "attack_type": label,
+        "prediction": label,
+        "confidence": round(conf, 4),
+        "risk": risk,
+        "risk_level": "Low" if label == "BENIGN" else "High",
+        **feat_dict,
+    }
+
+    PREDICTION_HISTORY.append(record)
+    logger.info(f"Ingested live flow #{record['record_index']} → {label} ({conf:.2%}) | Risk: {risk}")
+
+    return JSONResponse(content={
+        "status": "ok",
+        "message": "Flow ingested and predicted",
+        "prediction": label,
+        "confidence": round(conf, 4),
+        "risk": risk,
+    })
+
+
+@app.get("/api/recent-predictions", tags=["Live Traffic"])
+async def recent_predictions(limit: int = 50):
+    """
+    Returns the latest predictions from live traffic ingestion.
+    If no local flows have been ingested yet, attempts to query NOVATECH_URL
+    if running, or returns an empty list without error.
+    """
+    limit = max(1, min(limit, 500))
+
+    if len(PREDICTION_HISTORY) > 0:
+        entries = list(PREDICTION_HISTORY)[-limit:]
+        return JSONResponse(content={
+            "total_stored": len(PREDICTION_HISTORY),
+            "returned": len(entries),
+            "feature_count": len(feature_cols) if feature_cols else 0,
+            "predictions": entries,
+            "flows": entries,
+        })
+
+    # If no local predictions yet, check if NovaTech backend has any
+    if NOVATECH_URL:
+        url = f"{NOVATECH_URL}/api/recent-predictions"
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(url, params={"limit": limit})
+                if resp.status_code == 200:
+                    return JSONResponse(content=resp.json())
+        except Exception:
+            pass
+
+    return JSONResponse(content={
+        "total_stored": 0,
+        "returned": 0,
+        "predictions": [],
+        "flows": [],
     })
