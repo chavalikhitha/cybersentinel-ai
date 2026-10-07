@@ -190,21 +190,27 @@ async def predict_csv(file: UploadFile = File(...)):
 
     contents = await file.read()
     try:
-        df = pd.read_csv(io.BytesIO(contents))
+        df = pd.read_csv(io.BytesIO(contents), low_memory=False)
+    except UnicodeDecodeError:
+        try:
+            df = pd.read_csv(io.BytesIO(contents), encoding="latin-1", low_memory=False)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Could not parse CSV: {e}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not parse CSV: {e}")
 
     if df.empty:
         raise HTTPException(status_code=400, detail="The uploaded CSV file is empty.")
 
-    logger.info(f"Received CSV: {file.filename} | Rows: {len(df)} | Cols: {len(df.columns)}")
+    total_rows = len(df)
+    logger.info(f"Received CSV: {file.filename} | Rows: {total_rows} | Cols: {len(df.columns)}")
 
     # --- Strip whitespace from column names (common Colab export issue) ---
     df.columns = df.columns.str.strip()
 
     # --- Align columns to training feature order ---
     # Drop any label/target column if present
-    label_col_candidates = ["Label", "label", " Label"]
+    label_col_candidates = ["Label", "label", " Label", "LABEL"]
     for col in label_col_candidates:
         if col in df.columns:
             df = df.drop(columns=[col])
@@ -216,35 +222,46 @@ async def predict_csv(file: UploadFile = File(...)):
 
     X = df.reindex(columns=feature_cols, fill_value=0)
 
-    # Replace inf / NaN values
-    X = X.replace([np.inf, -np.inf], np.nan).fillna(0)
+    # Coerce any dirty non-numeric strings ('Infinity', 'NaN', spaces) to numeric and clean
+    X = X.apply(pd.to_numeric, errors="coerce")
+    X = X.replace([np.inf, -np.inf], np.nan).fillna(0).astype(np.float32)
 
-    # --- Predict ---
-    try:
-        probabilities = model.predict_proba(X)          # shape: (n_rows, n_classes)
-        predicted_indices = np.argmax(probabilities, axis=1)
-        predicted_labels = label_encoder.inverse_transform(predicted_indices)
-        confidences = probabilities[np.arange(len(probabilities)), predicted_indices]
-    except Exception as e:
-        logger.error(f"Prediction error: {e}")
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
-
-    # --- Build response ---
+    # --- Batch Prediction (5,000 rows per chunk) ---
+    BATCH_SIZE = 5000
     predictions = []
     summary: dict[str, int] = {}
 
-    for i, (label, conf) in enumerate(zip(predicted_labels, confidences)):
-        risk = get_risk(label)
-        predictions.append({
-            "record_index": i,
-            "attack_type": label,
-            "confidence": round(float(conf), 4),
-            "risk": risk,
-        })
-        summary[label] = summary.get(label, 0) + 1
+    logger.info(f"Processing {total_rows} records in batches of {BATCH_SIZE}...")
+
+    try:
+        for start_idx in range(0, total_rows, BATCH_SIZE):
+            end_idx = min(start_idx + BATCH_SIZE, total_rows)
+            X_batch = X.iloc[start_idx:end_idx]
+
+            probabilities = model.predict_proba(X_batch)
+            predicted_indices = np.argmax(probabilities, axis=1)
+            predicted_labels = label_encoder.inverse_transform(predicted_indices)
+            confidences = probabilities[np.arange(len(probabilities)), predicted_indices]
+
+            for i_offset, (label, conf) in enumerate(zip(predicted_labels, confidences)):
+                global_index = start_idx + i_offset
+                risk = get_risk(label)
+                predictions.append({
+                    "record_index": global_index,
+                    "attack_type": label,
+                    "confidence": round(float(conf), 4),
+                    "risk": risk,
+                })
+                summary[label] = summary.get(label, 0) + 1
+
+    except Exception as e:
+        logger.error(f"Prediction error during batch processing: {e}")
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
+
+    logger.info(f"Analysis complete for {total_rows} records. Summary: {summary}")
 
     return JSONResponse(content={
-        "total_records": len(df),
+        "total_records": total_rows,
         "predictions": predictions,
         "summary": summary,
     })
