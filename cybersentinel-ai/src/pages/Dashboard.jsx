@@ -14,57 +14,93 @@ const COLORS = [
 
 const POLL_INTERVAL_MS = 3000;
 
-/* ── Derive dashboard stats from the predictions array ── */
-function buildDashboardData(predictions) {
-  const total = predictions.length;
+/* ── Derive dashboard stats from ML predictions and live HTTP traffic ── */
+function buildDashboardData(predictions, trafficEvents) {
+  const hasML = Array.isArray(predictions) && predictions.length > 0;
+  const hasHTTP = Array.isArray(trafficEvents) && trafficEvents.length > 0;
 
-  const attacks = predictions.filter(
-    (p) => (p.attack_type || '').toUpperCase() !== 'BENIGN'
-  );
+  // 1. Total Traffic Analyzed: uses the count of live HTTP traffic events from /api/traffic-events
+  const totalTraffic = hasHTTP
+    ? trafficEvents.length.toLocaleString()
+    : 'Waiting for live traffic...';
 
-  const hasHigh = predictions.some(
-    (p) => (p.risk || '').toUpperCase() === 'HIGH'
-  );
-  const currentRisk = hasHigh ? 'HIGH' : total === 0 ? '—' : 'LOW';
+  // 2. Attacks Detected: continues using only ML predictions (/api/recent-predictions)
+  const attacks = hasML
+    ? predictions.filter((p) => (p.attack_type || '').toUpperCase() !== 'BENIGN')
+    : [];
+  const attacksDetected = hasML
+    ? attacks.length.toLocaleString()
+    : hasHTTP
+    ? '0'
+    : 'Waiting for live traffic...';
 
-  // Build attack distribution counts
+  // 3. Current Risk: continues using only ML predictions (do not infer from HTTP events)
+  const hasHigh = hasML && predictions.some((p) => (p.risk || '').toUpperCase() === 'HIGH');
+  const hasMedium = hasML && predictions.some((p) => (p.risk || '').toUpperCase() === 'MEDIUM');
+  const currentRisk = hasML
+    ? hasHigh
+      ? 'HIGH'
+      : hasMedium
+      ? 'MEDIUM'
+      : 'LOW'
+    : hasHTTP
+    ? 'NO ML DATA'
+    : '—';
+
+  // 4. Model Confidence: continues using only ML predictions
+  let modelConfidence = 'N/A';
+  if (hasML) {
+    const validConfs = predictions.filter((p) => typeof p.confidence === 'number');
+    if (validConfs.length > 0) {
+      const avg = validConfs.reduce((acc, p) => acc + p.confidence, 0) / validConfs.length;
+      modelConfidence = `${(avg * 100).toFixed(1)}%`;
+    }
+  }
+
+  // Attack distribution from ML predictions
   const counts = {};
-  predictions.forEach((p) => {
-    const label = p.attack_type || 'UNKNOWN';
-    counts[label] = (counts[label] || 0) + 1;
-  });
+  if (hasML) {
+    predictions.forEach((p) => {
+      const label = p.attack_type || 'UNKNOWN';
+      counts[label] = (counts[label] || 0) + 1;
+    });
+  }
   const chartData = Object.entries(counts)
     .sort((a, b) => b[1] - a[1])
     .map(([name, value]) => ({ name, value }));
 
-  // Format records for AttackTable — map API fields → table fields
-  const tableData = predictions.map((p, idx) => ({
-    id: p.record_index ?? idx,
-    timestamp: p.timestamp || '—',
-    attackType: p.attack_type || '—',
-    confidence: p.confidence ?? null,
-    risk: p.risk || 'LOW',
-    status:
-      (p.risk || '').toUpperCase() === 'HIGH'
-        ? 'BLOCKED'
-        : (p.risk || '').toUpperCase() === 'MEDIUM'
-        ? 'FLAGGED'
-        : 'CLEAN',
-  }));
+  // Format records for AttackTable from ML predictions
+  const tableData = hasML
+    ? predictions.map((p, idx) => ({
+        id: p.record_index ?? idx,
+        timestamp: p.timestamp || '—',
+        attackType: p.attack_type || '—',
+        confidence: p.confidence ?? null,
+        risk: p.risk || 'LOW',
+        status:
+          (p.risk || '').toUpperCase() === 'HIGH'
+            ? 'BLOCKED'
+            : (p.risk || '').toUpperCase() === 'MEDIUM'
+            ? 'FLAGGED'
+            : 'CLEAN',
+      }))
+    : [];
 
   return {
-    totalTraffic: total.toLocaleString(),
-    attacksDetected: attacks.length.toLocaleString(),
+    totalTraffic,
+    attacksDetected,
     currentRisk,
+    modelConfidence,
     chartData,
     tableData,
+    hasML,
+    hasHTTP,
   };
 }
 
 export default function Dashboard() {
   const [predictions, setPredictions]     = useState([]);
   const [trafficEvents, setTrafficEvents] = useState([]);
-  const [hasData, setHasData]             = useState(false);
   const [fetchError, setFetchError]       = useState(null);
   const intervalRef                       = useRef(null);
 
@@ -79,16 +115,18 @@ export default function Dashboard() {
         const data = predRes.value;
         const list = Array.isArray(data) ? data : (data?.predictions ?? []);
         setPredictions(list);
-        setHasData(list.length > 0);
-        setFetchError(null);
-      } else {
-        setFetchError(predRes.reason?.message || 'Failed to fetch predictions');
       }
 
       if (eventsRes.status === 'fulfilled') {
         const evData = eventsRes.value;
         const evList = Array.isArray(evData) ? evData : (evData?.events ?? []);
         setTrafficEvents(evList);
+      }
+
+      if (predRes.status === 'fulfilled' || eventsRes.status === 'fulfilled') {
+        setFetchError(null);
+      } else {
+        setFetchError(predRes.reason?.message || eventsRes.reason?.message || 'Backend unavailable');
       }
     } catch (err) {
       setFetchError(err.message);
@@ -107,9 +145,12 @@ export default function Dashboard() {
     totalTraffic,
     attacksDetected,
     currentRisk,
+    modelConfidence,
     chartData,
     tableData,
-  } = buildDashboardData(predictions);
+    hasML,
+    hasHTTP,
+  } = buildDashboardData(predictions, trafficEvents);
 
   const waitingMsg = 'Waiting for live traffic...';
 
@@ -134,29 +175,37 @@ export default function Dashboard() {
           <StatCard
             icon={<Activity size={20} />}
             label="Total Traffic Analyzed"
-            value={hasData ? totalTraffic : waitingMsg}
-            sub="Records from last 50 predictions"
+            value={totalTraffic}
+            sub={hasHTTP ? "Live HTTP events (/api/traffic-events)" : "Waiting for HTTP events"}
             accent="blue"
           />
           <StatCard
             icon={<AlertTriangle size={20} />}
             label="Attacks Detected"
-            value={hasData ? attacksDetected : waitingMsg}
-            sub="Non-BENIGN predictions"
+            value={attacksDetected}
+            sub={hasML ? "Non-BENIGN ML predictions" : "Random Forest predictions (/api/recent-predictions)"}
             accent="red"
           />
           <StatCard
             icon={<Shield size={20} />}
             label="Current Risk"
-            value={hasData ? currentRisk : waitingMsg}
-            sub="Based on recent predictions"
-            accent="yellow"
+            value={currentRisk}
+            sub={hasML ? "Based on ML predictions" : "Requires ML predictions"}
+            accent={
+              currentRisk === 'HIGH'
+                ? 'red'
+                : currentRisk === 'MEDIUM'
+                ? 'yellow'
+                : currentRisk === 'LOW'
+                ? 'green'
+                : 'blue'
+            }
           />
           <StatCard
             icon={<TrendingUp size={20} />}
             label="Model Confidence"
-            value="N/A"
-            sub="Not provided by this endpoint"
+            value={modelConfidence}
+            sub={hasML ? "Average prediction confidence" : "Requires ML predictions"}
             accent="green"
           />
         </div>
@@ -167,14 +216,14 @@ export default function Dashboard() {
             <div className="card-header">
               <h2 className="card-title">Attack Distribution</h2>
               <span className="card-badge">
-                {hasData ? `Live · polled every ${POLL_INTERVAL_MS / 1000}s` : 'Waiting for data'}
+                {hasML ? `Live · polled every ${POLL_INTERVAL_MS / 1000}s` : 'Waiting for ML data'}
               </span>
             </div>
-            {hasData ? (
+            {hasML ? (
               <AttackDistributionPieChart data={chartData} />
             ) : (
               <p style={{ padding: '24px 20px', color: '#9ca3af', fontSize: 13 }}>
-                {fetchError ? 'Backend unavailable.' : waitingMsg}
+                {fetchError ? 'Backend unavailable.' : 'Waiting for ML attack predictions (/api/recent-predictions)...'}
               </p>
             )}
           </div>
@@ -184,7 +233,7 @@ export default function Dashboard() {
               <h2 className="card-title">Attack Summary</h2>
             </div>
             <div className="summary-list">
-              {hasData ? (
+              {hasML ? (
                 chartData.map((item, idx) => (
                   <div key={item.name} className="summary-row">
                     <div
@@ -197,7 +246,7 @@ export default function Dashboard() {
                 ))
               ) : (
                 <p style={{ padding: '12px 16px', color: '#9ca3af', fontSize: 13 }}>
-                  {fetchError ? 'Backend unavailable.' : waitingMsg}
+                  {fetchError ? 'Backend unavailable.' : 'No ML attack data'}
                 </p>
               )}
             </div>
@@ -209,14 +258,14 @@ export default function Dashboard() {
           <div className="card-header">
             <h2 className="card-title">Recent Detections</h2>
             <span className="card-badge">
-              {hasData ? `Last ${tableData.length} records` : 'Waiting for data'}
+              {hasML ? `Last ${tableData.length} records` : 'Waiting for ML data'}
             </span>
           </div>
-          {hasData ? (
+          {hasML ? (
             <AttackTable data={tableData} />
           ) : (
             <p style={{ padding: '24px 20px', color: '#9ca3af', fontSize: 13 }}>
-              {fetchError ? 'Backend unavailable.' : waitingMsg}
+              {fetchError ? 'Backend unavailable.' : 'Waiting for ML attack predictions (/api/recent-predictions)...'}
             </p>
           )}
         </div>
